@@ -14,9 +14,103 @@ from agentless.util.preprocess_data import (
     filter_out_test_files,
     get_repo_structure,
 )
-from agentless.util.utils import load_existing_instance_ids, load_jsonl, setup_logger
+from agentless.util.utils import (
+    load_env_file,
+    load_existing_instance_ids,
+    load_jsonl,
+    setup_logger,
+)
 
 MAX_RETRIES = 5
+
+
+def load_eval_dataset(args):
+    dataset_path = args.dataset_path or os.environ.get("LOCBENCH_DATASET_PATH")
+    if dataset_path:
+        return load_jsonl(dataset_path)
+    return load_dataset(args.dataset, split="test")
+
+
+def _collect_raw_outputs(artifact):
+    outputs = []
+    if not artifact:
+        return outputs
+    if isinstance(artifact, dict):
+        raw = artifact.get("raw_output_loc")
+        if raw is None:
+            raw = artifact.get("raw_output_files")
+        if raw is None:
+            return outputs
+        if isinstance(raw, list):
+            outputs.extend(raw)
+        else:
+            outputs.append(raw)
+        return outputs
+    if isinstance(artifact, list):
+        for item in artifact:
+            outputs.extend(_collect_raw_outputs(item))
+    return outputs
+
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    result = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _extract_related_entities(found_related_locs):
+    entities = []
+    for file_path, locs in (found_related_locs or {}).items():
+        if isinstance(locs, str):
+            loc_lines = locs.splitlines()
+        else:
+            loc_lines = []
+            for loc in locs:
+                if isinstance(loc, str):
+                    loc_lines.extend(loc.splitlines())
+        for line in loc_lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(("function:", "class:", "variable:")):
+                name = line.split(":", 1)[1].strip()
+                if name:
+                    entities.append(f"{file_path}:{name}")
+    return _dedupe_preserve_order(entities)
+
+
+def _build_locbench_meta(bench_data):
+    meta_keys = ["repo", "base_commit", "problem_statement", "patch", "test_patch"]
+    return {key: bench_data.get(key) for key in meta_keys if key in bench_data}
+
+
+def _build_locbench_output(
+    instance_id,
+    bench_data,
+    found_files,
+    found_related_locs,
+    additional_artifact_loc_file,
+    additional_artifact_loc_related,
+    additional_artifact_loc_edit_location,
+):
+    found_entities = _extract_related_entities(found_related_locs)
+    raw_output_loc = []
+    raw_output_loc.extend(_collect_raw_outputs(additional_artifact_loc_file))
+    raw_output_loc.extend(_collect_raw_outputs(additional_artifact_loc_related))
+    raw_output_loc.extend(_collect_raw_outputs(additional_artifact_loc_edit_location))
+    return {
+        "instance_id": instance_id,
+        "found_files": found_files,
+        "found_modules": found_entities,
+        "found_entities": found_entities,
+        "raw_output_loc": raw_output_loc,
+        "meta_data": _build_locbench_meta(bench_data),
+    }
 
 
 def localize_irrelevant_instance(
@@ -42,7 +136,11 @@ def localize_irrelevant_instance(
     bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
     problem_statement = bench_data["problem_statement"]
     structure = get_repo_structure(
-        instance_id, bug["repo"], bug["base_commit"], "playground"
+        instance_id,
+        bug["repo"],
+        bug["base_commit"],
+        "playground",
+        local_repo_root=args.local_repo_root,
     )
 
     filter_none_python(structure)  # some basic filtering steps
@@ -66,6 +164,7 @@ def localize_irrelevant_instance(
             args.model,
             args.backend,
             logger,
+            max_context_length=args.max_context_length,
         )
         found_files, additional_artifact_loc_file, file_traj = fl.localize_irrelevant(
             mock=args.mock
@@ -75,24 +174,31 @@ def localize_irrelevant_instance(
 
     if write_lock is not None:
         write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "found_files": found_files,
-                    "additional_artifact_loc_file": additional_artifact_loc_file,
-                    "file_traj": file_traj,
-                    "found_related_locs": found_related_locs,
-                    "additional_artifact_loc_related": additional_artifact_loc_related,
-                    "related_loc_traj": related_loc_traj,
-                    "found_edit_locs": found_edit_locs,
-                    "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
-                    "edit_loc_traj": edit_loc_traj,
-                }
-            )
-            + "\n"
+    if args.output_format == "locbench":
+        output_record = _build_locbench_output(
+            instance_id,
+            bench_data,
+            found_files,
+            found_related_locs,
+            additional_artifact_loc_file,
+            additional_artifact_loc_related,
+            additional_artifact_loc_edit_location,
         )
+    else:
+        output_record = {
+            "instance_id": instance_id,
+            "found_files": found_files,
+            "additional_artifact_loc_file": additional_artifact_loc_file,
+            "file_traj": file_traj,
+            "found_related_locs": found_related_locs,
+            "additional_artifact_loc_related": additional_artifact_loc_related,
+            "related_loc_traj": related_loc_traj,
+            "found_edit_locs": found_edit_locs,
+            "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
+            "edit_loc_traj": edit_loc_traj,
+        }
+    with open(args.output_file, "a") as f:
+        f.write(json.dumps(output_record) + "\n")
     if write_lock is not None:
         write_lock.release()
 
@@ -116,7 +222,11 @@ def localize_instance(
         return
 
     structure = get_repo_structure(
-        instance_id, bug["repo"], bug["base_commit"], "playground"
+        instance_id,
+        bug["repo"],
+        bug["base_commit"],
+        "playground",
+        local_repo_root=args.local_repo_root,
     )
 
     logger.info(f"================ localize {instance_id} ================")
@@ -144,6 +254,7 @@ def localize_instance(
             args.model,
             args.backend,
             logger,
+            max_context_length=args.max_context_length,
         )
         found_files, additional_artifact_loc_file, file_traj = fl.localize(
             mock=args.mock
@@ -181,6 +292,7 @@ def localize_instance(
                     args.model,
                     args.backend,
                     logger,
+                    max_context_length=args.max_context_length,
                 )
                 additional_artifact_loc_related = []
                 found_related_locs = {}
@@ -281,6 +393,7 @@ def localize_instance(
                     args.model,
                     args.backend,
                     logger,
+                    max_context_length=args.max_context_length,
                 )
                 if not args.direct_edit_loc:
                     coarse_found_locs = found_related_locs
@@ -373,30 +486,37 @@ def localize_instance(
 
     if write_lock is not None:
         write_lock.acquire()
-    with open(args.output_file, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "instance_id": instance_id,
-                    "found_files": found_files,
-                    "additional_artifact_loc_file": additional_artifact_loc_file,
-                    "file_traj": file_traj,
-                    "found_related_locs": found_related_locs,
-                    "additional_artifact_loc_related": additional_artifact_loc_related,
-                    "related_loc_traj": related_loc_trajs,
-                    "found_edit_locs": found_edit_locs,
-                    "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
-                    "edit_loc_traj": edit_loc_traj,
-                }
-            )
-            + "\n"
+    if args.output_format == "locbench":
+        output_record = _build_locbench_output(
+            instance_id,
+            bench_data,
+            found_files,
+            found_related_locs,
+            additional_artifact_loc_file,
+            additional_artifact_loc_related,
+            additional_artifact_loc_edit_location,
         )
+    else:
+        output_record = {
+            "instance_id": instance_id,
+            "found_files": found_files,
+            "additional_artifact_loc_file": additional_artifact_loc_file,
+            "file_traj": file_traj,
+            "found_related_locs": found_related_locs,
+            "additional_artifact_loc_related": additional_artifact_loc_related,
+            "related_loc_traj": related_loc_trajs,
+            "found_edit_locs": found_edit_locs,
+            "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
+            "edit_loc_traj": edit_loc_traj,
+        }
+    with open(args.output_file, "a") as f:
+        f.write(json.dumps(output_record) + "\n")
     if write_lock is not None:
         write_lock.release()
 
 
 def localize_irrelevant(args):
-    swe_bench_data = load_dataset(args.dataset, split="test")
+    swe_bench_data = load_eval_dataset(args)
     existing_instance_ids = (
         load_existing_instance_ids(args.output_file) if args.skip_existing else set()
     )
@@ -430,7 +550,7 @@ def localize_irrelevant(args):
 
 
 def localize(args):
-    swe_bench_data = load_dataset(args.dataset, split="test")
+    swe_bench_data = load_eval_dataset(args)
     start_file_locs = load_jsonl(args.start_file) if args.start_file else None
     existing_instance_ids = (
         load_existing_instance_ids(args.output_file) if args.skip_existing else set()
@@ -505,6 +625,18 @@ def check_valid_args(args):
         not os.path.exists(args.output_file) or args.skip_existing
     ), "Output file already exists and not set to skip existing localizations"
 
+    dataset_path = args.dataset_path or os.environ.get("LOCBENCH_DATASET_PATH")
+    if dataset_path:
+        assert os.path.exists(
+            dataset_path
+        ), f"Dataset path not found: {dataset_path}"
+
+    local_repo_root = args.local_repo_root or os.environ.get("LOCBENCH_REPO_ROOT")
+    if local_repo_root:
+        assert os.path.isdir(
+            local_repo_root
+        ), f"Local repo root not found: {local_repo_root}"
+
     assert not (
         args.file_level and args.start_file
     ), "Cannot use both file_level and start_file"
@@ -572,12 +704,12 @@ def main():
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=[
-            "gpt-4o-2024-05-13",
-            "deepseek-coder",
-            "gpt-4o-mini-2024-07-18",
-            "claude-3-5-sonnet-20241022",
-        ],
+    )
+    parser.add_argument(
+        "--max_context_length",
+        type=int,
+        default=128000,
+        help="Maximum context length for prompt + completion tokens.",
     )
     parser.add_argument(
         "--backend",
@@ -586,14 +718,53 @@ def main():
         choices=["openai", "deepseek", "anthropic"],
     )
     parser.add_argument(
+        "--env_file",
+        type=str,
+        default=".env",
+        help="Path to a .env file to load before running.",
+    )
+    parser.add_argument(
+        "--env_override",
+        action="store_true",
+        help="Override existing environment variables with .env values.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        help="Path to a local JSONL dataset; overrides --dataset if set.",
+    )
+    parser.add_argument(
         "--dataset",
         type=str,
         default="princeton-nlp/SWE-bench_Lite",
         choices=["princeton-nlp/SWE-bench_Lite", "princeton-nlp/SWE-bench_Verified"],
         help="Current supported dataset for evaluation",
     )
+    parser.add_argument(
+        "--local_repo_root",
+        type=str,
+        help="Root directory for local repo checkouts (e.g., locbench_repos).",
+    )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="swebench",
+        choices=["swebench", "locbench"],
+        help="Output schema for localization results.",
+    )
 
     args = parser.parse_args()
+    load_env_file(args.env_file, override=args.env_override)
+    if not args.dataset_path:
+        args.dataset_path = os.environ.get("LOCBENCH_DATASET_PATH")
+    if not args.local_repo_root:
+        args.local_repo_root = os.environ.get("LOCBENCH_REPO_ROOT")
+    env_context_length = os.environ.get("MODEL_CONTEXT_LENGTH")
+    if env_context_length and args.max_context_length == 128000:
+        try:
+            args.max_context_length = int(env_context_length)
+        except ValueError:
+            pass
     args.output_file = os.path.join(args.output_folder, args.output_file)
     check_valid_args(args)
 

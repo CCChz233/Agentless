@@ -34,6 +34,33 @@ def load_json(filepath):
     return json.load(open(filepath, "r"))
 
 
+def load_env_file(path=".env", override=False):
+    if not path or not os.path.exists(path):
+        return False
+    with open(path, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :]
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in ("'", '"')
+            ):
+                value = value[1:-1]
+            if not override and key in os.environ:
+                continue
+            os.environ[key] = value
+    return True
+
+
 def combine_by_instance_id(data):
     """
     Combine data entries by their instance ID.

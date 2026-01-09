@@ -1,8 +1,14 @@
 import json
 import os
+import shutil
+import subprocess
+import tempfile
+import uuid
+from threading import Lock
 
 from agentless.util.parse_global_var import parse_global_var_from_code
 from get_repo_structure.get_repo_structure import (
+    create_structure,
     get_project_structure_from_scratch,
     parse_python_file,
 )
@@ -646,18 +652,110 @@ def get_full_file_paths_and_classes_and_functions(structure, current_path=""):
 
 
 PROJECT_FILE_LOC = os.environ.get("PROJECT_FILE_LOC", None)
+LOCAL_REPO_ROOT = os.environ.get("LOCBENCH_REPO_ROOT", None)
+WORKTREE_LOCK = Lock()
 
 
-def get_repo_structure(instance_id: str, repo_name, base_commit, playground):
+def _repo_name_to_dirname(repo_name: str) -> str:
+    return repo_name.replace("/", "_")
 
+
+def _get_local_repo_path(repo_name: str, local_repo_root: str) -> str:
+    return os.path.join(local_repo_root, _repo_name_to_dirname(repo_name))
+
+
+def _strip_root_key(structure: dict) -> dict:
+    if isinstance(structure, dict) and len(structure) == 1:
+        return next(iter(structure.values()))
+    return structure
+
+
+def get_project_structure_from_local_repo(
+    repo_name: str,
+    commit_id: str,
+    instance_id: str,
+    local_repo_root: str,
+):
+    repo_path = _get_local_repo_path(repo_name, local_repo_root)
+    if not os.path.isdir(repo_path):
+        raise FileNotFoundError(
+            f"Local repo not found: {repo_path} (from {repo_name})"
+        )
+
+    worktree_path = os.path.join(
+        tempfile.gettempdir(), f"agentless_worktree_{uuid.uuid4().hex}"
+    )
+
+    try:
+        with WORKTREE_LOCK:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo_path,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    worktree_path,
+                    commit_id,
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        structure = create_structure(worktree_path)
+        structure = _strip_root_key(structure)
+    finally:
+        with WORKTREE_LOCK:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    repo_path,
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree_path,
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        shutil.rmtree(worktree_path, ignore_errors=True)
+
+    return {
+        "repo": repo_name,
+        "base_commit": commit_id,
+        "structure": structure,
+        "instance_id": instance_id,
+    }
+
+
+def get_repo_structure(
+    instance_id: str,
+    repo_name,
+    base_commit,
+    playground,
+    local_repo_root: str | None = None,
+):
     if PROJECT_FILE_LOC is not None:
         with open(PROJECT_FILE_LOC + "/" + instance_id + ".json") as f:
             d = json.load(f)
         repo_structure = d["structure"]
     else:
-        d = get_project_structure_from_scratch(
-            repo_name, base_commit, instance_id, playground
+        local_root = (
+            local_repo_root
+            or os.environ.get("LOCBENCH_REPO_ROOT")
+            or LOCAL_REPO_ROOT
         )
+        if local_root:
+            d = get_project_structure_from_local_repo(
+                repo_name, base_commit, instance_id, local_root
+            )
+        else:
+            d = get_project_structure_from_scratch(
+                repo_name, base_commit, instance_id, playground
+            )
         repo_structure = d["structure"]
 
     return repo_structure

@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Dict, Union
 
@@ -14,9 +15,9 @@ def num_tokens_from_messages(message, model="gpt-3.5-turbo-0301"):
         encoding = tiktoken.get_encoding("cl100k_base")
     if isinstance(message, list):
         # use last message.
-        num_tokens = len(encoding.encode(message[0]["content"]))
+        num_tokens = len(encoding.encode(message[0]["content"], disallowed_special=()))
     else:
-        num_tokens = len(encoding.encode(message))
+        num_tokens = len(encoding.encode(message, disallowed_special=()))
     return num_tokens
 
 
@@ -59,7 +60,8 @@ def request_chatgpt_engine(config, logger, base_url=None, max_retries=40, timeou
     ret = None
     retries = 0
 
-    client = openai.OpenAI(base_url=base_url)
+    resolved_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+    client = openai.OpenAI(base_url=resolved_base_url)
 
     while ret is None and retries < max_retries:
         try:

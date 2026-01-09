@@ -231,6 +231,7 @@ Return just the locations wrapped with ```.
         model_name,
         backend,
         logger,
+        max_context_length=MAX_CONTEXT_LENGTH,
         **kwargs,
     ):
         super().__init__(instance_id, structure, problem_statement)
@@ -238,6 +239,48 @@ Return just the locations wrapped with ```.
         self.model_name = model_name
         self.backend = backend
         self.logger = logger
+        self.max_context_length = max_context_length
+
+    def _max_prompt_tokens(self):
+        return max(1, self.max_context_length - self.max_tokens)
+
+    def _prompt_too_long(self, message):
+        from agentless.util.api_requests import num_tokens_from_messages
+
+        return num_tokens_from_messages(message, self.model_name) >= self._max_prompt_tokens()
+
+    def _truncate_structure_for_prompt(self, structure_text, template):
+        lines = structure_text.splitlines()
+        if not lines:
+            return structure_text
+
+        low, high = 1, len(lines)
+        best = None
+        while low <= high:
+            mid = (low + high) // 2
+            candidate = "\n".join(lines[:mid])
+            message = template.format(
+                problem_statement=self.problem_statement,
+                structure=candidate,
+            ).strip()
+            if self._prompt_too_long(message):
+                high = mid - 1
+            else:
+                best = candidate
+                low = mid + 1
+
+        if best is None:
+            raise ValueError(
+                "Prompt too long even after truncating repository structure."
+            )
+
+        if len(best.splitlines()) < len(lines):
+            self.logger.info(
+                "Truncated repository structure from %s to %s lines to fit context.",
+                len(lines),
+                len(best.splitlines()),
+            )
+        return best
 
     def _parse_model_return_lines(self, content: str) -> list[str]:
         if content:
@@ -247,10 +290,20 @@ Return just the locations wrapped with ```.
         from agentless.util.api_requests import num_tokens_from_messages
         from agentless.util.model import make_model
 
-        message = self.obtain_irrelevant_files_prompt.format(
+        structure_text = show_project_structure(self.structure).strip()
+        template = self.obtain_irrelevant_files_prompt
+        message = template.format(
             problem_statement=self.problem_statement,
-            structure=show_project_structure(self.structure).strip(),
+            structure=structure_text,
         ).strip()
+        if self._prompt_too_long(message):
+            structure_text = self._truncate_structure_for_prompt(
+                structure_text, template
+            )
+            message = template.format(
+                problem_statement=self.problem_statement,
+                structure=structure_text,
+            ).strip()
         self.logger.info(f"prompting with message:\n{message}")
         self.logger.info("=" * 80)
 
@@ -316,10 +369,20 @@ Return just the locations wrapped with ```.
 
         found_files = []
 
-        message = self.obtain_relevant_files_prompt.format(
+        structure_text = show_project_structure(self.structure).strip()
+        template = self.obtain_relevant_files_prompt
+        message = template.format(
             problem_statement=self.problem_statement,
-            structure=show_project_structure(self.structure).strip(),
+            structure=structure_text,
         ).strip()
+        if self._prompt_too_long(message):
+            structure_text = self._truncate_structure_for_prompt(
+                structure_text, template
+            )
+            message = template.format(
+                problem_statement=self.problem_statement,
+                structure=structure_text,
+            ).strip()
         self.logger.info(f"prompting with message:\n{message}")
         self.logger.info("=" * 80)
         if mock:
@@ -400,9 +463,7 @@ Return just the locations wrapped with ```.
         self.logger.info("\n" + message)
 
         def message_too_long(message):
-            return (
-                num_tokens_from_messages(message, self.model_name) >= MAX_CONTEXT_LENGTH
-            )
+            return self._prompt_too_long(message)
 
         while message_too_long(message) and len(contents) > 1:
             self.logger.info(f"reducing to \n{len(contents)} files")
@@ -484,9 +545,7 @@ Return just the locations wrapped with ```.
         self.logger.info("\n" + message)
 
         def message_too_long(message):
-            return (
-                num_tokens_from_messages(message, self.model_name) >= MAX_CONTEXT_LENGTH
-            )
+            return self._prompt_too_long(message)
 
         while message_too_long(message) and len(contents) > 1:
             self.logger.info(f"reducing to \n{len(contents)} files")
@@ -582,9 +641,7 @@ Return just the locations wrapped with ```.
         self.logger.info("=" * 80)
 
         def message_too_long(message):
-            return (
-                num_tokens_from_messages(message, self.model_name) >= MAX_CONTEXT_LENGTH
-            )
+            return self._prompt_too_long(message)
 
         while message_too_long(message) and len(coarse_locs) > 1:
             self.logger.info(f"reducing to \n{len(coarse_locs)} files")
@@ -708,9 +765,7 @@ Return just the locations wrapped with ```.
         self.logger.info("\n" + message)
 
         def message_too_long(message):
-            return (
-                num_tokens_from_messages(message, self.model_name) >= MAX_CONTEXT_LENGTH
-            )
+            return self._prompt_too_long(message)
 
         while message_too_long(message) and len(contents) > 1:
             self.logger.info(f"reducing to \n{len(contents)} files")
