@@ -767,13 +767,49 @@ def get_repo_files(structure, filepaths: list[str]):
     for filepath in filepaths:
         content = None
 
+        # 尝试精确匹配
         for file_content in files:
             if file_content[0] == filepath:
                 content = "\n".join(file_content[1])
                 file_contents[filepath] = content
                 break
+        
+        # 2. 如果精确匹配失败，尝试规范化路径匹配（处理路径格式差异）
+        if content is None:
+            # 规范化路径：移除前导斜杠，统一路径分隔符
+            normalized_filepath = filepath.lstrip("/").replace("\\", "/")
+            for file_content in files:
+                normalized_file = file_content[0].lstrip("/").replace("\\", "/")
+                # 精确匹配规范化后的路径
+                if normalized_file == normalized_filepath:
+                    content = "\n".join(file_content[1])
+                    file_contents[filepath] = content
+                    break
+        
+        # 3. 如果仍然找不到，尝试文件名匹配（只比较文件名，忽略路径）
+        if content is None:
+            import os
+            target_filename = os.path.basename(filepath)
+            if target_filename:  # 确保文件名不为空
+                for file_content in files:
+                    file_name = os.path.basename(file_content[0])
+                    if file_name == target_filename:
+                        content = "\n".join(file_content[1])
+                        file_contents[filepath] = content
+                        break
 
-        assert content is not None, "file not found"
+        # 4. 如果仍然找不到，记录警告但继续处理其他文件（不中断流程）
+        if content is None:
+            import logging
+            logger = logging.getLogger(__name__)
+            available_files_sample = [f[0] for f in files[:10]]
+            logger.warning(
+                f"File not found in structure: {filepath}. "
+                f"Available files (sample): {available_files_sample}"
+            )
+            # 不抛出异常，而是跳过该文件，避免整个流程中断
+            continue
+
     return file_contents
 
 

@@ -84,6 +84,36 @@ def _extract_related_entities(found_related_locs):
     return _dedupe_preserve_order(entities)
 
 
+def _extract_related_modules(found_related_locs):
+    """Extract module-level information from found_related_locs.
+    Module format: file.py:module_name (where module_name is the first part before '.' of the entity name)
+    """
+    modules = []
+    seen_modules = set()
+    for file_path, locs in (found_related_locs or {}).items():
+        if isinstance(locs, str):
+            loc_lines = locs.splitlines()
+        else:
+            loc_lines = []
+            for loc in locs:
+                if isinstance(loc, str):
+                    loc_lines.extend(loc.splitlines())
+        for line in loc_lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(("function:", "class:", "variable:")):
+                name = line.split(":", 1)[1].strip()
+                if name:
+                    # Extract module name (first part before '.')
+                    module_name = name.split('.')[0]
+                    module_id = f"{file_path}:{module_name}"
+                    if module_id not in seen_modules:
+                        modules.append(module_id)
+                        seen_modules.add(module_id)
+    return _dedupe_preserve_order(modules)
+
+
 def _build_locbench_meta(bench_data):
     meta_keys = ["repo", "base_commit", "problem_statement", "patch", "test_patch"]
     return {key: bench_data.get(key) for key in meta_keys if key in bench_data}
@@ -99,6 +129,7 @@ def _build_locbench_output(
     additional_artifact_loc_edit_location,
 ):
     found_entities = _extract_related_entities(found_related_locs)
+    found_modules = _extract_related_modules(found_related_locs)
     raw_output_loc = []
     raw_output_loc.extend(_collect_raw_outputs(additional_artifact_loc_file))
     raw_output_loc.extend(_collect_raw_outputs(additional_artifact_loc_related))
@@ -106,7 +137,7 @@ def _build_locbench_output(
     return {
         "instance_id": instance_id,
         "found_files": found_files,
-        "found_modules": found_entities,
+        "found_modules": found_modules,
         "found_entities": found_entities,
         "raw_output_loc": raw_output_loc,
         "meta_data": _build_locbench_meta(bench_data),

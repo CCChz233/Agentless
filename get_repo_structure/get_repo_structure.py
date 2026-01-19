@@ -103,13 +103,15 @@ def parse_python_file(file_path, file_content=None):
                 file_content = file.read()
                 parsed_data = ast.parse(file_content)
         except Exception as e:  # Catch all types of exceptions
-            print(f"Error in file {file_path}: {e}")
+            # 静默处理语法错误，避免输出过多警告信息
+            # print(f"Error in file {file_path}: {e}")
             return [], [], ""
     else:
         try:
             parsed_data = ast.parse(file_content)
         except Exception as e:  # Catch all types of exceptions
-            print(f"Error in file {file_path}: {e}")
+            # 静默处理语法错误，避免输出过多警告信息
+            # print(f"Error in file {file_path}: {e}")
             return [], [], ""
 
     class_info = []
